@@ -30,15 +30,32 @@ def get_google_sheets_client():
         try:
             logger.info("✅ Используем GOOGLE_CREDENTIALS из переменных окружения")
             creds_dict = json.loads(creds_json)
-            credentials = Credentials.from_service_account_info(creds_dict)
-            return gspread.authorize(credentials)
+            
+            # Указываем правильные scopes для Google Sheets API
+            SCOPES = [
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/drive'
+            ]
+            
+            credentials = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+            client = gspread.authorize(credentials)
+            logger.info("✅ Успешная авторизация в Google Sheets")
+            return client
         except json.JSONDecodeError as e:
             logger.error(f"❌ Ошибка парсинга GOOGLE_CREDENTIALS: {e}")
             raise
+        except Exception as e:
+            logger.error(f"❌ Ошибка авторизации: {e}")
+            raise
     else:
         # Development: используем файл
-        logger.info("✅ Используем credentials.json из файла")
-        return gspread.service_account(filename='credentials.json')
+        logger.info("ℹ️ GOOGLE_CREDENTIALS не найдена, пробуем credentials.json")
+        if os.path.exists('credentials.json'):
+            logger.info("✅ Используем credentials.json из файла")
+            return gspread.service_account(filename='credentials.json')
+        else:
+            logger.error("❌ credentials.json не найден и GOOGLE_CREDENTIALS не установлена")
+            raise FileNotFoundError("❌ Не найдены credentials ни в переменных окружения, ни в файле")
 
 
 # === РАБОТА С GOOGLE TABLES ===
@@ -49,14 +66,15 @@ class GoogleSheetsManager:
             self.gc = get_google_sheets_client()
             self.sheet = self.gc.open(GOOGLE_SHEET_NAME).sheet1
             logger.info("✅ Успешно подключились к Google Таблице")
+            
+            # Проверяем доступ простым запросом
+            test_value = self.sheet.acell('A1').value
+            logger.info(f"✅ Тестовый запрос выполнен успешно. A1: {test_value}")
+            
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Google Таблице: {e}")
-            # Более информативное сообщение об ошибке
-            if os.environ.get('GOOGLE_CREDENTIALS'):
-                logger.error("❌ GOOGLE_CREDENTIALS найдена, но есть ошибка авторизации")
-            else:
-                logger.error("❌ GOOGLE_CREDENTIALS не найдена в переменных окружения")
             raise
+
 
     def find_user_row(self, user_id):
         """Найти строку пользователя по ID"""
