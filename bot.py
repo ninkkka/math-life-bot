@@ -1,7 +1,7 @@
 import gspread
 import logging
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from datetime import datetime
 import json
 import os
@@ -26,7 +26,14 @@ def get_google_sheets_client():
         try:
             logger.info("✅ Используем GOOGLE_CREDENTIALS из переменных окружения")
             creds_dict = json.loads(creds_json)
-            credentials = Credentials.from_service_account_info(creds_dict)
+            
+            # Указываем правильные scopes для Google Sheets API
+            SCOPES = [
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/drive'
+            ]
+            
+            credentials = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
             client = gspread.authorize(credentials)
             logger.info("✅ Успешная авторизация в Google Sheets")
             return client
@@ -91,7 +98,7 @@ class GoogleSheetsManager:
             logger.error(f"❌ Ошибка регистрации: {e}")
             return False, f"Ошибка регистрации: {e}"
 
-def start_command(update: Update, context: CallbackContext):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
     
@@ -103,7 +110,7 @@ def start_command(update: Update, context: CallbackContext):
             full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
             success, message = sheets.register_user(user_id, user.username, full_name)
             if success:
-                update.message.reply_text(
+                await update.message.reply_text(
                     f"🎉 Добро пожаловать, {user.first_name}!\n\n"
                     f"✅ Ты успешно зарегистрирован в системе!\n"
                     f"💫 Начальный баланс: 3 жизни\n\n"
@@ -112,17 +119,17 @@ def start_command(update: Update, context: CallbackContext):
                     f"/help - Помощь"
                 )
             else:
-                update.message.reply_text(f"❌ Ошибка регистрации: {message}")
+                await update.message.reply_text(f"❌ Ошибка регистрации: {message}")
         else:
-            update.message.reply_text(
+            await update.message.reply_text(
                 f"👋 С возвращением, {user.first_name}!\n\n"
                 f"💫 Твой текущий баланс: {balance} жизней"
             )
     except Exception as e:
         logger.error(f"❌ Ошибка в команде /start: {e}")
-        update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
 
-def balance_command(update: Update, context: CallbackContext):
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
     
@@ -131,7 +138,7 @@ def balance_command(update: Update, context: CallbackContext):
         balance = sheets.get_user_balance(user_id)
 
         if balance is None:
-            update.message.reply_text("❌ Ты не зарегистрирован! Напиши /start")
+            await update.message.reply_text("❌ Ты не зарегистрирован! Напиши /start")
             return
 
         if balance >= 3:
@@ -153,12 +160,12 @@ def balance_command(update: Update, context: CallbackContext):
 💫 Осталось жизней: {balance}
 📝 Статус: {status}
         """
-        update.message.reply_text(message)
+        await update.message.reply_text(message)
     except Exception as e:
         logger.error(f"❌ Ошибка в команде /balance: {e}")
-        update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
 
-def help_command(update: Update, context: CallbackContext):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 📖 Справка по системе жизней
 
@@ -172,31 +179,29 @@ def help_command(update: Update, context: CallbackContext):
 /balance - Баланс
 /help - Справка
     """
-    update.message.reply_text(help_text)
+    await update.message.reply_text(help_text)
 
-def handle_message(update: Update, context: CallbackContext):
-    update.message.reply_text("🤖 Используй команды: /start, /balance, /help")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Используй команды: /start, /balance, /help")
 
 def main():
     logger.info("🚀 Запуск Math Life Bot...")
     
     try:
-        # Используем Updater для версии 13.15
-        updater = Updater(BOT_TOKEN, use_context=True)
-        dispatcher = updater.dispatcher
+        # Создаем Application для современной версии python-telegram-bot
+        application = Application.builder().token(BOT_TOKEN).build()
         
         # Добавляем обработчики
-        dispatcher.add_handler(CommandHandler("start", start_command))
-        dispatcher.add_handler(CommandHandler("balance", balance_command))
-        dispatcher.add_handler(CommandHandler("help", help_command))
-        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("balance", balance_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Бот успешно запущен и готов к работе!")
         print("🤖 MATH LIFE BOT ЗАПУЩЕН!")
         
         # Запускаем бота
-        updater.start_polling()
-        updater.idle()
+        application.run_polling()
         
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске: {e}")
