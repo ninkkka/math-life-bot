@@ -28,6 +28,7 @@ def get_google_sheets_client():
     if creds_json:
         # Production: используем переменную окружения
         try:
+            logger.info("✅ Используем GOOGLE_CREDENTIALS из переменных окружения")
             creds_dict = json.loads(creds_json)
             credentials = Credentials.from_service_account_info(creds_dict)
             return gspread.authorize(credentials)
@@ -36,11 +37,8 @@ def get_google_sheets_client():
             raise
     else:
         # Development: используем файл
-        try:
-            return gspread.service_account(filename='credentials.json')
-        except FileNotFoundError:
-            logger.error("❌ Файл credentials.json не найден для локальной разработки")
-            raise
+        logger.info("✅ Используем credentials.json из файла")
+        return gspread.service_account(filename='credentials.json')
 
 
 # === РАБОТА С GOOGLE TABLES ===
@@ -53,9 +51,11 @@ class GoogleSheetsManager:
             logger.info("✅ Успешно подключились к Google Таблице")
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Google Таблице: {e}")
-            print("❌ Убедитесь, что:")
-            print("   1. Добавили GOOGLE_CREDENTIALS в Railway Variables")
-            print("   2. credentials.json лежит в папке (для локального запуска)")
+            # Более информативное сообщение об ошибке
+            if os.environ.get('GOOGLE_CREDENTIALS'):
+                logger.error("❌ GOOGLE_CREDENTIALS найдена, но есть ошибка авторизации")
+            else:
+                logger.error("❌ GOOGLE_CREDENTIALS не найдена в переменных окружения")
             raise
 
     def find_user_row(self, user_id):
@@ -357,6 +357,12 @@ def run_notifier(bot):
 # === ЗАПУСК ПРИЛОЖЕНИЯ ===
 def main():
     logger.info("🚀 Запуск Math Life Bot...")
+    
+    # Проверяем наличие переменных окружения
+    if os.environ.get('GOOGLE_CREDENTIALS'):
+        logger.info("✅ GOOGLE_CREDENTIALS найдена в переменных окружения")
+    else:
+        logger.info("ℹ️ GOOGLE_CREDENTIALS не найдена, будет использоваться credentials.json")
 
     try:
         bot = MathLifeBot()
