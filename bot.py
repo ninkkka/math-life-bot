@@ -5,6 +5,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from datetime import datetime
 import json
 import os
+import asyncio
 from google.oauth2.service_account import Credentials
 
 # === НАСТРОЙКИ ===
@@ -98,6 +99,161 @@ class GoogleSheetsManager:
             logger.error(f"❌ Ошибка регистрации: {e}")
             return False, f"Ошибка регистрации: {e}"
 
+    def update_balance(self, user_id, new_balance, reason=""):
+        """Обновить баланс пользователя"""
+        row = self.find_user_row(user_id)
+        if not row:
+            return False, "Пользователь не найден"
+
+        try:
+            self.sheet.update_cell(row, 4, new_balance)
+            self.sheet.update_cell(row, 5, new_balance)
+            self.sheet.update_cell(row, 6, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            logger.info(f"✅ Баланс пользователя {user_id} изменен на {new_balance}. Причина: {reason}")
+            return True, "Баланс обновлен"
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления баланса: {e}")
+            return False, f"Ошибка обновления: {e}"
+
+# === СИСТЕМА УВЕДОМЛЕНИЙ ===
+class BalanceNotifier:
+    def __init__(self, application, sheets_manager):
+        self.application = application
+        self.sheets = sheets_manager
+        self.last_balances = {}
+        self.initialize_balances()
+
+    def initialize_balances(self):
+        """Инициализируем начальные балансы при запуске"""
+        try:
+            all_records = self.sheets.sheet.get_all_records()
+            for record in all_records:
+                user_id = record.get('Telegram ID')
+                balance = record.get('Баланс', 0)
+                if user_id:
+                    self.last_balances[str(user_id)] = balance
+            logger.info(f"✅ Инициализированы балансы для {len(self.last_balances)} пользователей")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации балансов: {e}")
+
+    async def check_balance_changes(self, context: ContextTypes.DEFAULT_TYPE = None):
+        """Проверяем изменения балансов и отправляем уведомления"""
+        try:
+            all_records = self.sheets.sheet.get_all_records()
+            changes_found = False
+
+            for record in all_records:
+                user_id = str(record.get('Telegram ID', ''))
+                current_balance = record.get('Баланс', 0)
+
+                if user_id and user_id != 'None':
+                    last_balance = self.last_balances.get(user_id)
+                    
+                    # Если баланс изменился
+                    if last_balance is not None and current_balance != last_balance:
+                        changes_found = True
+                        reason = "📈 Баланс увеличен" if current_balance > last_balance else "📉 Баланс уменьшен"
+                        
+                        try:
+                            await self.application.bot.send_message(
+                                chat_id=int(user_id),
+                                text=f"💫 Изменение баланса!\n\n"
+                                     f"🔄 {reason}\n"
+                                     f"💫 Новый баланс: {current_balance} жизней\n\n"
+                                     f"💡 Проверь детали: /balance"
+                            )
+                            logger.info(f"✅ Уведомление отправлено пользователю {user_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Не удалось отправить уведомление {user_id}: {e}")
+
+                        # Обновляем последнее известное значение
+                        self.last_balances[user_id] = current_balance
+
+            if changes_found:
+                logger.info("✅ Проверка изменений завершена, уведомления отправлены")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка при проверке изменений баланса: {e}")
+
+# === АДМИН-КОМАНДЫ ===
+class AdminTools:
+    def __init__(self, sheets_manager):
+        self.sheets = sheets_manager
+
+    async def update_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда для изменения баланса /update user_id ±число причина"""
+        # Проверяем админские права
+        if update.message.from_user.username != ADMIN_USERNAME:
+            await update.message.reply_text("❌ Нет доступа")
+            return
+
+        if len(context.args) < 3:
+            await update.message.reply_text(
+                "❌ Неправильный формат команды!\n\n"
+                "📝 **Правильное использование:**\n"
+                "`/update USER_ID ИЗМЕНЕНИЕ ПРИЧИНА`\n\n"
+                "🔢 **Примеры:**\n"
+                "`/update 361845909 +1 Досрочная_сдача_ДЗ`\n"
+                "`/update 361845909 -1 Просрочка_задания`\n\n"
+                "💡 **Используйте подчеркивания _ вместо пробелов**"
+            )
+            return
+
+        try:
+            user_id = int(context.args[0])
+            change = int(context.args[1])
+            reason = ' '.join(context.args[2:]).replace('_', ' ')  # Заменяем _ на пробелы
+
+            # Получаем текущий баланс
+            current_balance = self.sheets.get_user_balance(user_id)
+            if current_balance is None:
+                await update.message.reply_text("❌ Ученик не найден")
+                return
+
+            # Вычисляем новый баланс
+            new_balance = current_balance + change
+            
+            # Проверяем, чтобы баланс не ушел в минус
+            if new_balance < 0:
+                new_balance = 0
+
+            # Обновляем в таблице
+            success, message = self.sheets.update_balance(user_id, new_balance, reason)
+
+            if success:
+                # Пытаемся отправить уведомление ученику
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"💫 Изменение баланса!\n\n"
+                             f"🔄 Причина: {reason}\n"
+                             f"💫 Новый баланс: {new_balance} жизней\n\n"
+                             f"💡 Подробнее: /balance"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось отправить уведомление ученику {user_id}: {e}")
+
+                await update.message.reply_text(
+                    f"✅ Баланс обновлен!\n"
+                    f"👤 Ученик: {user_id}\n"
+                    f"💫 Было: {current_balance} → Стало: {new_balance}\n"
+                    f"📝 Причина: {reason}"
+                )
+            else:
+                await update.message.reply_text(f"❌ Ошибка: {message}")
+
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат!\n\n"
+                "📝 **Правильное использование:**\n"
+                "`/update USER_ID ИЗМЕНЕНИЕ ПРИЧИНА`\n\n"
+                "🔢 **Пример:**\n"
+                "`/update 361845909 +1 Ты_молодец`"
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка в update_balance: {e}")
+            await update.message.reply_text("❌ Произошла ошибка")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
@@ -188,17 +344,36 @@ def main():
     logger.info("🚀 Запуск Math Life Bot...")
     
     try:
-        # Создаем Application для современной версии python-telegram-bot
+        # Создаем менеджер таблиц
+        sheets_manager = GoogleSheetsManager()
+        
+        # Создаем Application
         application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Создаем систему уведомлений
+        notifier = BalanceNotifier(application, sheets_manager)
+        
+        # Создаем админ-инструменты
+        admin_tools = AdminTools(sheets_manager)
         
         # Добавляем обработчики
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("balance", balance_command))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("update", admin_tools.update_balance))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
+        # Запускаем фоновую задачу для проверки изменений
+        application.job_queue.run_repeating(
+            lambda context: asyncio.create_task(notifier.check_balance_changes(context)),
+            interval=30,  # Проверяем каждые 30 секунд
+            first=10      # Первая проверка через 10 секунд после запуска
+        )
+        
         logger.info("✅ Бот успешно запущен и готов к работе!")
+        logger.info("✅ Система уведомлений активирована")
         print("🤖 MATH LIFE BOT ЗАПУЩЕН!")
+        print("🔔 Система уведомлений активна")
         
         # Запускаем бота
         application.run_polling()
