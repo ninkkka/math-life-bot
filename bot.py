@@ -401,6 +401,7 @@ def main():
         print("⏹️  Нажмите Ctrl+C для остановки")
         print("="*50 + "\n")
 
+        # Используем правильный метод для новой версии python-telegram-bot
         bot.application.run_polling()
 
     except Exception as e:
