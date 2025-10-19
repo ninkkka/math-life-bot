@@ -3,14 +3,16 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime
-import asyncio
+import json
+import os
+import time
+from threading import Thread
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = "8444538558:AAF3vHHUC4YZb6BZUfzGVETjVFTzXDSedis"  # ЗАМЕНИТЕ на токен из @BotFather
 GOOGLE_SHEET_NAME = "Жизни учеников"
 ADMIN_USERNAME = "niinaaaa"  # ЗАМЕНИТЕ на ваш username
 
-# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -22,11 +24,24 @@ logger = logging.getLogger(__name__)
 class GoogleSheetsManager:
     def __init__(self):
         try:
-            self.gc = gspread.service_account('credentials.json')
+            # Пробуем получить credentials из переменной окружения (для Railway)
+            credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
+            if credentials_json:
+                logger.info("✅ Используем credentials из переменной окружения")
+                credentials_dict = json.loads(credentials_json)
+                self.gc = gspread.service_account_from_dict(credentials_dict)
+            else:
+                # Локальная разработка
+                logger.info("✅ Используем credentials из файла")
+                self.gc = gspread.service_account('credentials.json')
+
             self.sheet = self.gc.open(GOOGLE_SHEET_NAME).sheet1
             logger.info("✅ Успешно подключились к Google Таблице")
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Google Таблице: {e}")
+            print("❌ Убедитесь, что:")
+            print("   1. Добавили GOOGLE_CREDENTIALS в Railway Variables")
+            print("   2. credentials.json лежит в папке (для локального запуска)")
             raise
 
     def find_user_row(self, user_id):
@@ -62,8 +77,8 @@ class GoogleSheetsManager:
                 str(user_id),
                 f"@{username}" if username else "без username",
                 full_name,
-                3,
-                3,
+                3,  # Начальный баланс
+                3,  # Последний баланс
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ]
             self.sheet.append_row(new_row)
@@ -83,7 +98,6 @@ class GoogleSheetsManager:
             self.sheet.update_cell(row, 4, new_balance)
             self.sheet.update_cell(row, 5, new_balance)
             self.sheet.update_cell(row, 6, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
             logger.info(f"✅ Баланс пользователя {user_id} изменен на {new_balance}. Причина: {reason}")
             return True, "Баланс обновлен"
         except Exception as e:
@@ -91,11 +105,65 @@ class GoogleSheetsManager:
             return False, f"Ошибка обновления: {e}"
 
 
+# === СИСТЕМА УВЕДОМЛЕНИЙ ===
+class BalanceNotifier:
+    def __init__(self, bot):
+        self.bot = bot
+        self.last_balances = {}
+
+    def initialize_balances(self):
+        """Инициализируем начальные балансы"""
+        try:
+            all_records = self.bot.sheets.sheet.get_all_records()
+            for record in all_records:
+                user_id = record.get('Telegram ID')
+                balance = record.get('Баланс', 0)
+                if user_id:
+                    self.last_balances[int(user_id)] = balance
+            logger.info(f"✅ Инициализированы балансы для {len(self.last_balances)} пользователей")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации балансов: {e}")
+
+    async def check_balance_changes(self):
+        """Проверяем изменения балансов и отправляем уведомления"""
+        try:
+            all_records = self.bot.sheets.sheet.get_all_records()
+
+            for record in all_records:
+                user_id = record.get('Telegram ID')
+                current_balance = record.get('Баланс', 0)
+
+                if user_id:
+                    user_id = int(user_id)
+                    last_balance = self.last_balances.get(user_id)
+
+                    if last_balance is not None and current_balance != last_balance:
+                        reason = "📈 Баланс увеличен" if current_balance > last_balance else "📉 Баланс уменьшен"
+
+                        try:
+                            await self.bot.application.bot.send_message(
+                                chat_id=user_id,
+                                text=f"💫 Изменение баланса!\n\n"
+                                     f"🔄 {reason}\n"
+                                     f"💫 Новый баланс: {current_balance} жизней\n\n"
+                                     f"💡 Проверь детали: /balance"
+                            )
+                            logger.info(f"✅ Уведомление отправлено пользователю {user_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Не удалось отправить уведомление {user_id}")
+
+                    self.last_balances[user_id] = current_balance
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при проверке изменений баланса: {e}")
+
+
 # === TELEGRAM BOT ===
 class MathLifeBot:
     def __init__(self):
         self.sheets = GoogleSheetsManager()
         self.application = Application.builder().token(BOT_TOKEN).build()
+        self.notifier = BalanceNotifier(self)
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -166,7 +234,7 @@ class MathLifeBot:
             status = "Срочно нужно исправлять!"
 
         message = f"""
-{emoji} **Твой баланс жизней**
+{emoji} Твой баланс жизней
 
 💫 Осталось жизней: {balance}
 📝 Статус: {status}
@@ -193,7 +261,6 @@ class MathLifeBot:
 
 🎯 Как заработать жизни?
 - Досрочная сдача = +1 жизнь
-- Активная работа = +1 жизнь
 
 📊 Команды:
 /start - Регистрация
@@ -253,68 +320,28 @@ class AdminTools:
             await update.message.reply_text("❌ Неверный формат")
 
 
-# === СИСТЕМА УВЕДОМЛЕНИЙ ===
-class BalanceNotifier:
-    def __init__(self, bot):
-        self.bot = bot
-        self.last_balances = {}  # Храним последние известные балансы
+# === ЗАПУСК СИСТЕМЫ УВЕДОМЛЕНИЙ ===
+def run_notifier(bot):
+    """Запуск системы уведомлений в отдельном потоке"""
+    def check_changes():
+        while True:
+            try:
+                import asyncio
+                # Создаем новый event loop для асинхронного вызова
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(bot.notifier.check_balance_changes())
+                loop.close()
+            except Exception as e:
+                logger.error(f"❌ Ошибка в системе уведомлений: {e}")
+            time.sleep(60)  # Проверяем каждую минуту
 
-    async def check_balance_changes(self):
-        """Проверяем изменения балансов и отправляем уведомления"""
-        try:
-            # Получаем все записи из таблицы
-            all_records = self.bot.sheets.sheet.get_all_records()
-
-            for record in all_records:
-                user_id = record.get('Telegram ID')
-                current_balance = record.get('Баланс', 0)
-
-                if user_id:
-                    user_id = int(user_id)
-                    last_balance = self.last_balances.get(user_id)
-
-                    # Если баланс изменился
-                    if last_balance is not None and current_balance != last_balance:
-                        reason = "📈 Баланс увеличен" if current_balance > last_balance else "📉 Баланс уменьшен"
-
-                        # Отправляем уведомление ученику
-                        try:
-                            await self.bot.application.bot.send_message(
-                                chat_id=user_id,
-                                text=f"💫 Изменение баланса!\n\n"
-                                     f"🔄 {reason}\n"
-                                     f"💫 Новый баланс: {current_balance} жизней\n\n"
-                                     f"💡 Проверь детали: /balance"
-                            )
-                            logger.info(f"✅ Уведомление отправлено пользователю {user_id}")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Не удалось отправить уведомление {user_id}: {e}")
-
-                    # Обновляем последний известный баланс
-                    self.last_balances[user_id] = current_balance
-
-            logger.info("✅ Проверка изменений баланса завершена")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка при проверке изменений баланса: {e}")
-
-    def initialize_balances(self):
-        """Инициализируем начальные балансы при запуске"""
-        try:
-            all_records = self.bot.sheets.sheet.get_all_records()
-            for record in all_records:
-                user_id = record.get('Telegram ID')
-                balance = record.get('Баланс', 0)
-                if user_id:
-                    self.last_balances[int(user_id)] = balance
-            logger.info(f"✅ Инициализированы балансы для {len(self.last_balances)} пользователей")
-        except Exception as e:
-            logger.error(f"❌ Ошибка инициализации балансов: {e}")
+    thread = Thread(target=check_changes, daemon=True)
+    thread.start()
 
 
-# === ЗАПУСК ===
+# === ЗАПУСК ПРИЛОЖЕНИЯ ===
 def main():
-    """Основная функция запуска"""
     logger.info("🚀 Запуск Math Life Bot...")
 
     try:
@@ -322,13 +349,20 @@ def main():
         admin_tools = AdminTools(bot)
         bot.application.add_handler(CommandHandler("update", admin_tools.update_balance))
 
+        # Инициализируем систему уведомлений
+        bot.notifier.initialize_balances()
+
+        # Запускаем систему уведомлений в отдельном потоке
+        run_notifier(bot)
+
         logger.info("✅ Бот успешно запущен и готов к работе!")
+        logger.info("✅ Система уведомлений запущена")
         print("\n" + "="*50)
         print("🤖 MATH LIFE BOT ЗАПУЩЕН!")
+        print("🔔 Система уведомлений активна")
         print("⏹️  Нажмите Ctrl+C для остановки")
         print("="*50 + "\n")
 
-        # Запускаем бота (блокирующий вызов)
         bot.application.run_polling()
 
     except Exception as e:
