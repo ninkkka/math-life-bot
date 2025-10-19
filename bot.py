@@ -7,11 +7,12 @@ import json
 import os
 import time
 from threading import Thread
+from google.oauth2.service_account import Credentials
 
 # === НАСТРОЙКИ ===
-BOT_TOKEN = "8444538558:AAF3vHHUC4YZb6BZUfzGVETjVFTzXDSedis"  # ЗАМЕНИТЕ на токен из @BotFather
+BOT_TOKEN = "8444538558:AAF3vHHUC4YZb6BZUfzGVETjVFTzXDSedis"
 GOOGLE_SHEET_NAME = "Жизни учеников"
-ADMIN_USERNAME = "niinaaaa"  # ЗАМЕНИТЕ на ваш username
+ADMIN_USERNAME = "niinaaaa"
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -20,21 +21,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_google_sheets_client():
+    """Универсальная функция для получения клиента Google Sheets"""
+    creds_json = os.environ.get('GOOGLE_CREDENTIALS')
+    
+    if creds_json:
+        # Production: используем переменную окружения
+        try:
+            creds_dict = json.loads(creds_json)
+            credentials = Credentials.from_service_account_info(creds_dict)
+            return gspread.authorize(credentials)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга GOOGLE_CREDENTIALS: {e}")
+            raise
+    else:
+        # Development: используем файл
+        try:
+            return gspread.service_account(filename='credentials.json')
+        except FileNotFoundError:
+            logger.error("❌ Файл credentials.json не найден для локальной разработки")
+            raise
+
+
 # === РАБОТА С GOOGLE TABLES ===
 class GoogleSheetsManager:
     def __init__(self):
         try:
-            # Пробуем получить credentials из переменной окружения (для Railway)
-            credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
-            if credentials_json:
-                logger.info("✅ Используем credentials из переменной окружения")
-                credentials_dict = json.loads(credentials_json)
-                self.gc = gspread.service_account_from_dict(credentials_dict)
-            else:
-                # Локальная разработка
-                logger.info("✅ Используем credentials из файла")
-                self.gc = gspread.service_account('credentials.json')
-
+            # Используем нашу универсальную функцию
+            self.gc = get_google_sheets_client()
             self.sheet = self.gc.open(GOOGLE_SHEET_NAME).sheet1
             logger.info("✅ Успешно подключились к Google Таблице")
         except Exception as e:
