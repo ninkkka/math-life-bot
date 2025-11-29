@@ -7,6 +7,8 @@ import json
 import os
 import asyncio
 from google.oauth2.service_account import Credentials
+from aiohttp import web
+import threading
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = "8444538558:AAF3vHHUC4YZb6BZUfzGVETjVFTzXDSedis"
@@ -18,6 +20,22 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def run_http_server():
+    """Запускает простой HTTP сервер для проверки портов на Render.com"""
+    async def handle(request):
+        return web.Response(text="🤖 Math Life Bot is running!")
+    
+    app = web.Application()
+    app.router.add_get('/', handle)
+    
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Запуск HTTP сервера на порту {port}")
+    web.run_app(app, host='0.0.0.0', port=port)
+
+# Запускаем HTTP сервер в отдельном потоке
+http_thread = threading.Thread(target=run_http_server, daemon=True)
+http_thread.start()
 
 def get_google_sheets_client():
     """Универсальная функция для получения клиента Google Sheets"""
@@ -301,6 +319,7 @@ def main():
         logger.info("✅ Обработчики команд зарегистрированы")
         print("🤖 MATH LIFE BOT ЗАПУЩЕН!")
         print("📝 Доступные команды: /start, /balance, /help, /update")
+        print("🌐 HTTP сервер запущен для проверки портов")
         
         # Запускаем бота
         application.run_polling()
